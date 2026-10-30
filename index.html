@@ -162,7 +162,7 @@ function setupMJPEG() {
 function setupMSE(codecHint) {
   active = mp4;
   mp4.style.display = "block";
-  const candidates = [codecHint, "avc1.42E033", "avc1.42E01F", "avc1.640033"].filter(Boolean);
+  const candidates = [codecHint, "avc1.4D4032", "avc1.4D4028", "avc1.640033", "avc1.42E01F"].filter(Boolean);
   const codec = candidates.find(c => MediaSource.isTypeSupported('video/mp4; codecs="' + c + '"'));
   if (!codec) { msg.innerText = "видео: кодек не поддерживается"; return; }
 

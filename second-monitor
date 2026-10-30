@@ -113,7 +113,7 @@ start_h264() {
     [ -p "$FMP4_FIFO" ] || mkfifo "$FMP4_FIFO"
     log "захват H.264 (NVENC, ${FPS}fps) + remux в fMP4..."
     nohup "$WFR" -o "$out" -c h264_nvenc -m mpegts -r "$FPS" -D -y \
-        -p preset=p4 -p profile=baseline -p rc=vbr -p cq=25 -p bf=0 -p g=30 \
+        -p preset=p4 -p profile=main -p rc=vbr -p cq=25 -p bf=0 -p g=30 \
         -f "$H264_FIFO" >"$LOGDIR/h264-wfr.log" 2>&1 &
     echo $! >"$PID_WFR"
     nohup ffmpeg -loglevel warning -y -f mpegts -i "$H264_FIFO" -c copy -f mp4 \

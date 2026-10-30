@@ -34,8 +34,8 @@ if MODE == "latency":
     CODEC = ""
 else:
     VIDEO_CT = "video/mp4"
-    # constrained baseline, уровень до 5.1 — покрывает наш NVENC-поток
-    CODEC = "avc1.42E033"
+    # fallback; пересчитывается из init-сегмента после старта (см. _compute_codec)
+    CODEC = "avc1.4D4032"
 
 
 # --- геометрия виртуального монитора (кэш) ---
@@ -212,8 +212,23 @@ def _push(data):
                 pass
 
 
+def _compute_codec(init):
+    """Извлекает точный avc1.PPCCLL из avcC-бокса init-сегмента."""
+    try:
+        idx = init.find(b"avcC")
+        if idx >= 0:
+            # avcC: [size 4][avcC 4][version 1][profile 1][compat 1][level 1]
+            profile = init[idx + 5]
+            constraints = init[idx + 6]
+            level = init[idx + 7]
+            return "avc1.%02X%02X%02X" % (profile, constraints, level)
+    except Exception:
+        pass
+    return "avc1.4D4032"
+
+
 async def _broadcaster():
-    global _init
+    global _init, CODEC
     buf = bytearray()
     fd = -1
     while True:
@@ -253,6 +268,7 @@ async def _broadcaster():
                 init, buf = _extract_init(buf)
                 if init is not None:
                     _init = init
+                    CODEC = _compute_codec(init)
             frags, buf = _extract_fragments(buf)
             for f in frags:
                 _push(f)
