@@ -1,6 +1,8 @@
-# second-monitor
+# pocketmonitor
 
 Use an Android phone as a **second monitor** for your Hyprland (Wayland) desktop, over USB — with working **touch input**.
+
+> The installed command is `second-monitor`.
 
 - **Two encoding modes** (switchable):
   - `gaming` — H.264 via NVENC (hardware, ~0% CPU), for when you don't want to steal CPU from games.
@@ -44,8 +46,8 @@ second-monitor start latency    # minimal latency
 ## Install
 
 ```sh
-git clone https://github.com/<user>/second-monitor.git
-cd second-monitor
+git clone https://github.com/qussit/pocketmonitor.git
+cd pocketmonitor
 ./install.sh
 ```
 
