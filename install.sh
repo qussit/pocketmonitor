@@ -39,6 +39,7 @@ install_deps() {
     local missing=()
     have hyprctl     || missing+=(hyprland)
     have wf-recorder || missing+=(wf-recorder)
+    have ffmpeg      || missing+=(ffmpeg)
     have jq          || missing+=(jq)
     have adb         || missing+=("$adb_pkg")
     have python3     || missing+=(python3)

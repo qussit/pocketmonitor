@@ -2,23 +2,28 @@
 #
 # second-monitor — Android-телефон как второй монитор на Hyprland (по USB).
 #
-# Цепочка: Hyprland headless-монитор -> wf-recorder (MJPEG) -> FIFO ->
-#          тач-сервер (Python: раздаёт страницу + MJPEG + WebSocket касаний).
+# Два режима кодирования:
+#   gaming  (по умолчанию) — H.264 NVENC (видеокарта), ~0% CPU. Для игр.
+#   latency                — MJPEG, минимальная задержка. Для видео со звуком.
+#
+# Цепочка: Hyprland headless-монитор -> wf-recorder (H.264/MJPEG) -> FIFO ->
+#          тач-сервер (Python: страница + видео + WebSocket касаний).
 # Тач: WebSocket -> uinput (виртуальная мышь).
 #
-# На телефоне открой в Chrome:  http://localhost:9000/  (видео + тач)
+# На телефоне открой в Chrome:  http://localhost:9000/
 #
 # Настройки (env):
 #   RES     — разрешение виртуального монитора (по умолчанию альбомное под Infinix Hot 30)
 #   SCALE   — масштаб UI (2 = крупный интерфейс)
 #   FPS     — частота кадров видео
-#   MJQ     — качество MJPEG (2..31, меньше = лучше)
+#   MJQ     — качество MJPEG (2..31, меньше = лучше) — только для latency
 #   POS     — позиция ("below" или "1920x0" и т.п.)
 #
 # Примеры:
-#   second-monitor start
-#   RES=1080x2460@60 POS=1920x0 second-monitor start   # портрет, справа
-#   second-monitor daemon                              # автозапуск (для exec-once)
+#   second-monitor start            # gaming-режим (мало CPU)
+#   second-monitor start latency    # latency-режим (мало задержки)
+#   RES=1080x2460@60 POS=1920x0 second-monitor start
+#   second-monitor daemon           # автозапуск (для exec-once), gaming-режим
 
 set -euo pipefail
 
@@ -38,7 +43,10 @@ LOGDIR="$HOME/.local/state/second-monitor"
 mkdir -p "$RUNDIR" "$LOGDIR"
 
 MJPEG_FIFO="$RUNDIR/mjpeg.fifo"
-PID_MJPEG="$RUNDIR/mjpeg.pid"
+H264_FIFO="$RUNDIR/h264.fifo"
+FMP4_FIFO="$RUNDIR/fmp4.fifo"
+PID_WFR="$RUNDIR/wf-recorder.pid"
+PID_FFMPEG="$RUNDIR/ffmpeg.pid"
 PID_TOUCH="$RUNDIR/touch.pid"
 
 TOUCH_PORT=9000
@@ -97,22 +105,53 @@ remove_headless() {
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
+# gaming: H.264 NVENC -> mpegts -> ffmpeg remux -> fragmented MP4
+start_h264() {
+    local out="$1"
+    if alive "$PID_WFR" && alive "$PID_FFMPEG"; then return; fi
+    [ -p "$H264_FIFO" ] || mkfifo "$H264_FIFO"
+    [ -p "$FMP4_FIFO" ] || mkfifo "$FMP4_FIFO"
+    log "захват H.264 (NVENC, ${FPS}fps) + remux в fMP4..."
+    nohup "$WFR" -o "$out" -c h264_nvenc -m mpegts -r "$FPS" -D -y \
+        -p preset=p4 -p profile=baseline -p rc=vbr -p cq=25 -p bf=0 -p g=30 \
+        -f "$H264_FIFO" >"$LOGDIR/h264-wfr.log" 2>&1 &
+    echo $! >"$PID_WFR"
+    nohup ffmpeg -loglevel warning -y -f mpegts -i "$H264_FIFO" -c copy -f mp4 \
+        -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 250000 \
+        "$FMP4_FIFO" >"$LOGDIR/h264-ffmpeg.log" 2>&1 &
+    echo $! >"$PID_FFMPEG"
+    sleep 2
+}
+
+# latency: MJPEG напрямую
 start_mjpeg() {
     local out="$1"
-    if alive "$PID_MJPEG"; then return; fi
+    if alive "$PID_WFR"; then return; fi
     [ -p "$MJPEG_FIFO" ] || mkfifo "$MJPEG_FIFO"
     log "захват MJPEG (${FPS}fps, качество $MJQ)..."
-    nohup "$WFR" -o "$out" -c mjpeg -m mpjpeg -r "$FPS" -D -y \
+    nohup "$WFR" -o "$out" -c mjpeg -m mpjpeg -r "$FPS" -y \
         -x yuv420p -p qscale="$MJQ" -f "$MJPEG_FIFO" >"$LOGDIR/mjpeg.log" 2>&1 &
-    echo $! >"$PID_MJPEG"
+    echo $! >"$PID_WFR"
     sleep 1
 }
 
+start_pipeline() {
+    local out="$1" mode="$2"
+    if [ "$mode" = "latency" ]; then
+        start_mjpeg "$out"
+    else
+        start_h264 "$out"
+    fi
+}
+
 start_touch() {
+    local mode="$1"
     if alive "$PID_TOUCH"; then return; fi
     [ -x "$BIN/uinput-inject" ] || { log "нет uinput-inject (тач отключён)"; return; }
-    log "запускаю тач-сервер (порт $TOUCH_PORT)..."
-    MJPEG_FIFO="$MJPEG_FIFO" TOUCH_PORT="$TOUCH_PORT" \
+    local vfifo
+    if [ "$mode" = "latency" ]; then vfifo="$MJPEG_FIFO"; else vfifo="$FMP4_FIFO"; fi
+    log "запускаю тач-сервер (режим $mode, порт $TOUCH_PORT)..."
+    MODE="$mode" VIDEO_FIFO="$vfifo" TOUCH_PORT="$TOUCH_PORT" \
         nohup python3 "$TOUCH_SRV" >"$LOGDIR/touch.log" 2>&1 &
     echo $! >"$PID_TOUCH"
 }
@@ -142,12 +181,17 @@ teardown_adb() {
 # --- команды ------------------------------------------------------------
 
 cmd_start() {
+    local mode="${1:-${MODE:-gaming}}"
+    case "$mode" in
+        gaming|latency) : ;;
+        *) die "неизвестный режим: $mode (нужно gaming|latency)" ;;
+    esac
     [ -x "$WFR" ] || die "нет $WFR"
 
     local out n
     out="$(ensure_headless)"
-    start_mjpeg "$out"
-    start_touch
+    start_pipeline "$out" "$mode"
+    start_touch "$mode"
 
     n="$(setup_adb)"
     if [ "$n" -gt 0 ]; then
@@ -157,28 +201,34 @@ cmd_start() {
     fi
 
     echo
-    log "ГОТОВО. Открой на телефоне (Chrome):"
+    log "ГОТОВО (режим: $mode). Открой на телефоне (Chrome):"
     echo "     http://localhost:$TOUCH_PORT/"
 }
 
 cmd_stop() {
     local p
-    for p in "$PID_TOUCH" "$PID_MJPEG"; do
-        if [ -f "$p" ]; then kill "$(cat "$p")" 2>/dev/null || true; fi
+    for p in "$PID_TOUCH" "$PID_FFMPEG" "$PID_WFR"; do
+        if [ -f "$p" ]; then
+            kill "$(cat "$p")" 2>/dev/null || true
+            sleep 0.3
+            kill -9 "$(cat "$p")" 2>/dev/null || true
+        fi
         rm -f "$p"
     done
     pkill -f "wf-recorder -o HEADLESS" 2>/dev/null || true
     pkill -f "touch-server.py" 2>/dev/null || true
-    rm -f "$MJPEG_FIFO"
+    rm -f "$MJPEG_FIFO" "$H264_FIFO" "$FMP4_FIFO"
     teardown_adb
     remove_headless
     log "остановлено"
 }
 
 cmd_status() {
-    echo "Захват MJPEG: $(alive "$PID_MJPEG" && echo работает || echo не запущен)"
-    echo "Тач-сервер:   $(alive "$PID_TOUCH" && echo работает || echo не запущен)"
-    echo "Устройства:   $(devices | paste -sd, - 2>/dev/null || echo нет)"
+    echo "Режим:       $(grep -q MODE=latency /proc/$(cat "$PID_TOUCH" 2>/dev/null)/environ 2>/dev/null && echo latency || echo gaming)"
+    echo "Захват:      $(alive "$PID_WFR"    && echo работает || echo не запущен)"
+    echo "ffmpeg remux: $(alive "$PID_FFMPEG" && echo работает || echo —)"
+    echo "Тач-сервер:  $(alive "$PID_TOUCH"  && echo работает || echo не запущен)"
+    echo "Устройства:  $(devices | paste -sd, - 2>/dev/null || echo нет)"
     echo "Вирт. монитор: $(headless_name)"
 }
 
@@ -196,23 +246,25 @@ cmd_adb() {
 # --- демон (для автозапуска) --------------------------------------------
 
 cmd_daemon() {
+    local mode="${1:-${MODE:-gaming}}"
     local out
     out="$(ensure_headless)"
-    start_mjpeg "$out"
-    start_touch
+    start_pipeline "$out" "$mode"
+    start_touch "$mode"
     setup_adb >/dev/null
 
     local last cur
     last=""
-    log "демон запущен, слежу за потоком и телефоном..."
+    log "демон запущен (режим $mode), слежу за потоком и телефоном..."
     while true; do
         if ! hyprctl version >/dev/null 2>&1; then
             log "Hyprland завершился — останавливаю демон"
             exit 0
         fi
 
-        alive "$PID_MJPEG" || start_mjpeg "$out"
-        alive "$PID_TOUCH" || start_touch
+        alive "$PID_WFR" || start_pipeline "$out" "$mode"
+        if [ "$mode" != "latency" ] && ! alive "$PID_FFMPEG"; then start_h264 "$out"; fi
+        alive "$PID_TOUCH" || start_touch "$mode"
 
         cur="$(devices | tr '\n' ' ')"
         if [ "$cur" != "$last" ]; then
@@ -227,10 +279,10 @@ cmd_daemon() {
 }
 
 case "${1:-}" in
-    start)  cmd_start ;;
+    start)  cmd_start "${2:-}" ;;
     stop)   cmd_stop ;;
     status) cmd_status ;;
     adb)    cmd_adb ;;
-    daemon) cmd_daemon ;;
-    *)      echo "использование: $0 {start|stop|status|adb|daemon}" ;;
+    daemon) cmd_daemon "${2:-}" ;;
+    *)      echo "использование: $0 {start|stop|status|adb|daemon} [gaming|latency]" ;;
 esac
