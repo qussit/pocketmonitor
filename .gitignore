@@ -1,0 +1,16 @@
+# built binaries / downloads
+/uinput-inject
+/wf-recorder
+/mediamtx
+
+# python
+__pycache__/
+*.pyc
+
+# logs / runtime
+*.log
+*.fifo
+*.pid
+
+# editor/os
+.DS_Store

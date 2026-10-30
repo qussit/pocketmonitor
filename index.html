@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#181825" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<title>Второй монитор</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               touch-action:none; user-select:none; -webkit-user-select:none; }
+  #video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000; }
+  #msg { position:absolute; left:0; top:0; width:100%; height:100%; display:flex;
+         align-items:center; justify-content:center; text-align:center; padding:20px;
+         box-sizing:border-box; color:#fff; font:600 15px/1.4 system-ui; pointer-events:none;
+         text-shadow:0 0 5px #000; }
+  #dot { position:absolute; width:10px; height:10px; border-radius:50%;
+         background:rgba(255,255,255,.5); pointer-events:none; display:none; }
+</style>
+</head>
+<body>
+<img id="video" src="/video.mjpg" alt="" />
+<div id="msg">нажми на экран</div>
+<div id="dot"></div>
+<script>
+const video = document.getElementById("video");
+const msg = document.getElementById("msg");
+const dot = document.getElementById("dot");
+
+// как только пошёл первый кадр — скрываем сообщение
+video.addEventListener("load", () => { if (fsDone) msg.innerText = ""; });
+video.addEventListener("error", () => { msg.innerText = "видео: ошибка соединения"; });
+
+// --- полноэкранный режим (скрывает адресную строку) ---
+let fsDone = false;
+function goFullscreen() {
+  if (fsDone) return;
+  fsDone = true;
+  msg.innerText = "";
+  const el = document.documentElement;
+  const p = el.requestFullscreen ? el.requestFullscreen() : null;
+  if (p && p.catch) p.catch(() => {});
+}
+video.addEventListener("touchstart", goFullscreen, { once: true, passive: true });
+
+// --- WebSocket для касаний ---
+let ws;
+function wsConnect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onclose = () => setTimeout(wsConnect, 1500);
+  ws.onerror = () => ws.close();
+}
+wsConnect();
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+// --- геометрия картинки с учётом letterbox ---
+function contentRect() {
+  const r = video.getBoundingClientRect();
+  const vw = video.naturalWidth, vh = video.naturalHeight;
+  if (!vw || !vh) return { left: r.left, top: r.top, width: r.width, height: r.height };
+  const box = r.width / r.height, vid = vw / vh;
+  if (box > vid) {
+    const cw = r.height * vid;
+    return { left: r.left + (r.width - cw)/2, top: r.top, width: cw, height: r.height };
+  }
+  const ch = r.width / vid;
+  return { left: r.left, top: r.top + (r.height - ch)/2, width: r.width, height: ch };
+}
+function norm(t) {
+  const c = contentRect();
+  return { nx: (t.clientX - c.left) / c.width, ny: (t.clientY - c.top) / c.height };
+}
+
+// --- жесты ---
+const touches = new Map();
+let twoStart = null;      // {time, cx, cy, moved}
+let lastCentroid = null;  // {x, y} в client-пикселях для скролла
+
+function centroid() {
+  let x = 0, y = 0, n = 0;
+  for (const t of touches.values()) { x += t.clientX; y += t.clientY; n++; }
+  return { x: x/n, y: y/n };
+}
+
+video.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) touches.set(t.identifier, t);
+  if (touches.size === 1) {
+    const p = norm([...touches.values()][0]);
+    send({ t: "d", x: p.nx, y: p.ny });
+  } else if (touches.size === 2) {
+    const c = centroid();
+    twoStart = { time: Date.now(), cx: c.x, cy: c.y, moved: 0 };
+    lastCentroid = c;
+  }
+}, { passive: false });
+
+video.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) touches.set(t.identifier, t);
+  if (touches.size === 1) {
+    const p = norm([...touches.values()][0]);
+    send({ t: "m", x: p.nx, y: p.ny });
+  } else if (touches.size === 2) {
+    const c = centroid();
+    if (lastCentroid) {
+      const dx = c.x - lastCentroid.x, dy = c.y - lastCentroid.y;
+      if (twoStart) twoStart.moved += Math.abs(dx) + Math.abs(dy);
+      send({ t: "s", dx, dy: -dy });  // пальцы вверх -> колесо вверх
+    }
+    lastCentroid = c;
+  }
+}, { passive: false });
+
+video.addEventListener("touchend", (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) touches.delete(t.identifier);
+  if (touches.size === 0) {
+    if (twoStart && (Date.now() - twoStart.time) < 350 && twoStart.moved < 40) {
+      const c = contentRect();
+      const nx = (twoStart.cx - c.left) / c.width, ny = (twoStart.cy - c.top) / c.height;
+      send({ t: "r", x: nx, y: ny });  // тап двумя пальцами = правый клик
+    } else {
+      send({ t: "u" });
+    }
+    twoStart = null; lastCentroid = null;
+  } else if (touches.size === 1) {
+    const p = norm([...touches.values()][0]);
+    twoStart = null; lastCentroid = null;
+    send({ t: "d", x: p.nx, y: p.ny });
+  }
+}, { passive: false });
+
+// индикатор касания
+video.addEventListener("pointerdown", (e) => {
+  dot.style.display = "block";
+  dot.style.left = (e.clientX - 5) + "px";
+  dot.style.top = (e.clientY - 5) + "px";
+});
+video.addEventListener("pointermove", (e) => {
+  if (e.buttons) { dot.style.left = (e.clientX - 5) + "px"; dot.style.top = (e.clientY - 5) + "px"; }
+});
+window.addEventListener("pointerup", () => dot.style.display = "none");
+
+// сервис-воркер (для установки как PWA)
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>
