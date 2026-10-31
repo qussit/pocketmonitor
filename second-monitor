@@ -182,6 +182,23 @@ teardown_adb() {
 
 # --- команды ------------------------------------------------------------
 
+# убить процессы пайплайна (без удаления headless-монитора и демона)
+kill_processes() {
+    local p
+    for p in "$PID_TOUCH" "$PID_FFMPEG" "$PID_WFR"; do
+        if [ -f "$p" ]; then
+            kill "$(cat "$p")" 2>/dev/null || true
+            sleep 0.3
+            kill -9 "$(cat "$p")" 2>/dev/null || true
+        fi
+        rm -f "$p"
+    done
+    pkill -f "wf-recorder -o HEADLESS" 2>/dev/null || true
+    pkill -f "touch-server.py" 2>/dev/null || true
+    pkill -x ffmpeg 2>/dev/null || true
+    rm -f "$MJPEG_FIFO" "$H264_FIFO" "$FMP4_FIFO"
+}
+
 kill_daemon() {
     # остановить фоновый демон (автозапуск), чтобы ручной start/stop не конфликтовал с ним
     if [ -f "$PID_DAEMON" ]; then
@@ -202,6 +219,7 @@ cmd_start() {
     [ -x "$WFR" ] || die "нет $WFR"
 
     kill_daemon
+    kill_processes
     local out n
     out="$(ensure_headless)"
     start_pipeline "$out" "$mode"
@@ -222,19 +240,8 @@ cmd_start() {
 
 cmd_stop() {
     kill_daemon
-    local p
-    for p in "$PID_TOUCH" "$PID_FFMPEG" "$PID_WFR"; do
-        if [ -f "$p" ]; then
-            kill "$(cat "$p")" 2>/dev/null || true
-            sleep 0.3
-            kill -9 "$(cat "$p")" 2>/dev/null || true
-        fi
-        rm -f "$p"
-    done
-    pkill -f "wf-recorder -o HEADLESS" 2>/dev/null || true
-    pkill -f "touch-server.py" 2>/dev/null || true
-    pkill -x ffmpeg 2>/dev/null || true
-    rm -f "$MJPEG_FIFO" "$H264_FIFO" "$FMP4_FIFO" "$MODE_FILE"
+    kill_processes
+    rm -f "$MODE_FILE"
     teardown_adb
     remove_headless
     log "остановлено"
