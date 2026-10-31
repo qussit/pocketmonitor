@@ -32,9 +32,10 @@ WFR="$BIN/wf-recorder"
 DIR="$HOME/.local/share/second-monitor"
 TOUCH_SRV="$DIR/touch-server.py"
 
-RES="${RES:-2460x1080@60}"
+RES="${RES:-1920x840@60}"
 SCALE="${SCALE:-2}"
 FPS="${FPS:-30}"
+GAMING_FPS="${GAMING_FPS:-15}"
 MJQ="${MJQ:-6}"
 POS="${POS:-below}"
 
@@ -127,11 +128,11 @@ start_h264() {
 
 # latency: MJPEG напрямую
 start_mjpeg() {
-    local out="$1"
+    local out="$1" fps="${2:-$FPS}"
     if alive "$PID_WFR"; then return; fi
     [ -p "$MJPEG_FIFO" ] || mkfifo "$MJPEG_FIFO"
-    log "захват MJPEG (${FPS}fps, качество $MJQ)..."
-    nohup "$WFR" -o "$out" -c mjpeg -m mpjpeg -r "$FPS" -y \
+    log "захват MJPEG (${fps}fps, качество $MJQ)..."
+    nohup "$WFR" -o "$out" -c mjpeg -m mpjpeg -r "$fps" -y \
         -x yuv420p -p qscale="$MJQ" -f "$MJPEG_FIFO" >"$LOGDIR/mjpeg.log" 2>&1 &
     echo $! >"$PID_WFR"
     sleep 1
@@ -140,9 +141,10 @@ start_mjpeg() {
 start_pipeline() {
     local out="$1" mode="$2"
     if [ "$mode" = "latency" ]; then
-        start_mjpeg "$out"
+        start_mjpeg "$out" "$FPS"
     else
-        start_h264 "$out"
+        # gaming: тоже MJPEG, но на пониженной частоте — мало CPU
+        start_mjpeg "$out" "$GAMING_FPS"
     fi
 }
 
@@ -150,10 +152,9 @@ start_touch() {
     local mode="$1"
     if alive "$PID_TOUCH"; then return; fi
     [ -x "$BIN/uinput-inject" ] || { log "нет uinput-inject (тач отключён)"; return; }
-    local vfifo
-    if [ "$mode" = "latency" ]; then vfifo="$MJPEG_FIFO"; else vfifo="$FMP4_FIFO"; fi
     log "запускаю тач-сервер (режим $mode, порт $TOUCH_PORT)..."
-    MODE="$mode" VIDEO_FIFO="$vfifo" TOUCH_PORT="$TOUCH_PORT" \
+    # видео всегда MJPEG -> сервер работает в MJPEG-режиме
+    MODE="latency" VIDEO_FIFO="$MJPEG_FIFO" TOUCH_PORT="$TOUCH_PORT" \
         nohup python3 "$TOUCH_SRV" >"$LOGDIR/touch.log" 2>&1 &
     echo $! >"$PID_TOUCH"
 }
@@ -291,7 +292,6 @@ cmd_daemon() {
         fi
 
         alive "$PID_WFR" || start_pipeline "$out" "$mode"
-        if [ "$mode" != "latency" ] && ! alive "$PID_FFMPEG"; then start_h264 "$out"; fi
         alive "$PID_TOUCH" || start_touch "$mode"
 
         cur="$(devices | tr '\n' ' ')"
