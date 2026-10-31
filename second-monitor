@@ -48,6 +48,8 @@ FMP4_FIFO="$RUNDIR/fmp4.fifo"
 PID_WFR="$RUNDIR/wf-recorder.pid"
 PID_FFMPEG="$RUNDIR/ffmpeg.pid"
 PID_TOUCH="$RUNDIR/touch.pid"
+PID_DAEMON="$RUNDIR/daemon.pid"
+MODE_FILE="$RUNDIR/mode"
 
 TOUCH_PORT=9000
 
@@ -180,6 +182,17 @@ teardown_adb() {
 
 # --- команды ------------------------------------------------------------
 
+kill_daemon() {
+    # остановить фоновый демон (автозапуск), чтобы ручной start/stop не конфликтовал с ним
+    if [ -f "$PID_DAEMON" ]; then
+        kill "$(cat "$PID_DAEMON")" 2>/dev/null || true
+        sleep 0.3
+        kill -9 "$(cat "$PID_DAEMON")" 2>/dev/null || true
+        rm -f "$PID_DAEMON"
+    fi
+    pkill -f "second-monitor daemon" 2>/dev/null || true
+}
+
 cmd_start() {
     local mode="${1:-${MODE:-gaming}}"
     case "$mode" in
@@ -188,10 +201,12 @@ cmd_start() {
     esac
     [ -x "$WFR" ] || die "нет $WFR"
 
+    kill_daemon
     local out n
     out="$(ensure_headless)"
     start_pipeline "$out" "$mode"
     start_touch "$mode"
+    echo "$mode" > "$MODE_FILE"
 
     n="$(setup_adb)"
     if [ "$n" -gt 0 ]; then
@@ -206,6 +221,7 @@ cmd_start() {
 }
 
 cmd_stop() {
+    kill_daemon
     local p
     for p in "$PID_TOUCH" "$PID_FFMPEG" "$PID_WFR"; do
         if [ -f "$p" ]; then
@@ -217,14 +233,16 @@ cmd_stop() {
     done
     pkill -f "wf-recorder -o HEADLESS" 2>/dev/null || true
     pkill -f "touch-server.py" 2>/dev/null || true
-    rm -f "$MJPEG_FIFO" "$H264_FIFO" "$FMP4_FIFO"
+    pkill -x ffmpeg 2>/dev/null || true
+    rm -f "$MJPEG_FIFO" "$H264_FIFO" "$FMP4_FIFO" "$MODE_FILE"
     teardown_adb
     remove_headless
     log "остановлено"
 }
 
 cmd_status() {
-    echo "Режим:       $(grep -q MODE=latency /proc/$(cat "$PID_TOUCH" 2>/dev/null)/environ 2>/dev/null && echo latency || echo gaming)"
+    echo "Режим:       $(cat "$MODE_FILE" 2>/dev/null || echo '—')"
+    echo "Демон:       $(alive "$PID_DAEMON" && echo запущен || echo не запущен)"
     echo "Захват:      $(alive "$PID_WFR"    && echo работает || echo не запущен)"
     echo "ffmpeg remux: $(alive "$PID_FFMPEG" && echo работает || echo —)"
     echo "Тач-сервер:  $(alive "$PID_TOUCH"  && echo работает || echo не запущен)"
@@ -252,6 +270,8 @@ cmd_daemon() {
     start_pipeline "$out" "$mode"
     start_touch "$mode"
     setup_adb >/dev/null
+    echo $$ > "$PID_DAEMON"
+    echo "$mode" > "$MODE_FILE"
 
     local last cur
     last=""
@@ -259,6 +279,7 @@ cmd_daemon() {
     while true; do
         if ! hyprctl version >/dev/null 2>&1; then
             log "Hyprland завершился — останавливаю демон"
+            rm -f "$PID_DAEMON"
             exit 0
         fi
 
